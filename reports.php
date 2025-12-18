@@ -17,6 +17,11 @@ $thirty_days_ago = (new DateTime())->sub(new DateInterval('P30D'));
 $filter_start_date = $_GET['start_date'] ?? $thirty_days_ago->format('Y-m-d');
 $filter_end_date = $_GET['end_date'] ?? $today->format('Y-m-d');
 $filter_branch_id = $is_admin ? ($_GET['branch_id'] ?? '') : $_SESSION['branch_id'];
+// --- âœ… NEW: Added new filters ---
+$filter_vehicle_id = $_GET['vehicle_id'] ?? '';
+$filter_consignor_id = $_GET['consignor_id'] ?? '';
+$filter_consignee_id = $_GET['consignee_id'] ?? '';
+
 
 // --- Data Fetching ---
 $report_data = [];
@@ -25,6 +30,7 @@ $total_shipment_expenses = 0;
 $total_gross_profit = 0;
 
 // Query 1: Get profit from individual shipments
+// --- âœ… MODIFIED: Added JOINs for vehicles and parties ---
 $sql_shipments = "
     SELECT 
         s.id, s.consignment_no, s.consignment_date, s.origin, s.destination, br.name as branch_name,
@@ -33,6 +39,9 @@ $sql_shipments = "
         COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.shipment_id = s.id), 0) AS other_expenses
     FROM shipments s
     LEFT JOIN branches br ON s.branch_id = br.id
+    LEFT JOIN vehicles v ON s.vehicle_id = v.id
+    LEFT JOIN parties p_consignor ON s.consignor_id = p_consignor.id
+    LEFT JOIN parties p_consignee ON s.consignee_id = p_consignee.id
 ";
 
 $where_clauses = [];
@@ -59,6 +68,24 @@ if ($is_admin) {
     $branch_filter_sql = " AND branch_id = " . intval($_SESSION['branch_id']);
 }
 
+// --- âœ… NEW: Add new filters to WHERE clause ---
+if (!empty($filter_vehicle_id)) {
+    $where_clauses[] = "s.vehicle_id = ?";
+    $params[] = $filter_vehicle_id;
+    $types .= "i";
+}
+if (!empty($filter_consignor_id)) {
+    $where_clauses[] = "s.consignor_id = ?";
+    $params[] = $filter_consignor_id;
+    $types .= "i";
+}
+if (!empty($filter_consignee_id)) {
+    $where_clauses[] = "s.consignee_id = ?";
+    $params[] = $filter_consignee_id;
+    $types .= "i";
+}
+// --- End of new WHERE clauses ---
+
 if (!empty($where_clauses)) {
     $sql_shipments .= " WHERE " . implode(" AND ", $where_clauses);
 }
@@ -81,10 +108,12 @@ while ($row = $result->fetch_assoc()) {
 }
 $stmt->close();
 
-// --- ✅ MODIFIED: Fetch Operational and Salary Expenses Separately ---
+// --- MODIFIED: Fetch Operational and Salary Expenses Separately ---
 $total_op_expenses = 0;
 $total_salary_expenses = 0;
 
+// This query remains unchanged as operational/salary expenses are not tied to shipments (shipment_id IS NULL)
+// They are correctly filtered by branch via $branch_filter_sql
 $op_expense_sql = "SELECT category, SUM(amount) as total FROM expenses WHERE shipment_id IS NULL AND expense_date BETWEEN ? AND ? {$branch_filter_sql} GROUP BY category";
 $stmt_op = $mysqli->prepare($op_expense_sql);
 $stmt_op->bind_param("ss", $filter_start_date, $filter_end_date);
@@ -105,10 +134,17 @@ $total_expenses = $total_shipment_expenses + $total_op_expenses + $total_salary_
 $net_profit = $total_revenue - $total_expenses;
 
 
+// --- âœ… NEW: Fetch data for filter dropdowns ---
 $branches = [];
 if ($is_admin) {
     $branches = $mysqli->query("SELECT id, name FROM branches WHERE is_active = 1 ORDER BY name ASC")->fetch_all(MYSQLI_ASSOC);
 }
+// --- ðŸ”´ FIX: Changed 'registration_no' to 'vehicle_number' ---
+$vehicles = $mysqli->query("SELECT id, vehicle_number FROM vehicles WHERE is_active = 1 ORDER BY vehicle_number ASC")->fetch_all(MYSQLI_ASSOC);
+// (Assuming 'parties' table with 'id' and 'name' for both consignors and consignees)
+$parties = $mysqli->query("SELECT id, name FROM parties WHERE is_active = 1 ORDER BY name ASC")->fetch_all(MYSQLI_ASSOC);
+// --- End of new data fetch ---
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -149,7 +185,7 @@ if ($is_admin) {
             <main class="flex-1 overflow-x-hidden overflow-y-auto bg-gray-100 p-4 md:p-8 [--webkit-overflow-scrolling:touch]">
                 
                 <div class="bg-white p-4 rounded-xl shadow-md mb-6 no-print">
-                    <form id="filter-form" method="GET" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
+                    <form id="filter-form" method="GET" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
                         <div>
                             <label for="start_date" class="block text-sm font-medium text-gray-700">Start Date</label>
                             <input type="date" name="start_date" id="start_date" value="<?php echo htmlspecialchars($filter_start_date); ?>" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm">
@@ -169,6 +205,38 @@ if ($is_admin) {
                             </select>
                         </div>
                         <?php endif; ?>
+
+                        <div>
+                            <label for="vehicle_id" class="block text-sm font-medium text-gray-700">Vehicle</label>
+                            <select name="vehicle_id" id="vehicle_id" class="searchable-select mt-1 block w-full">
+                                <option value="">All Vehicles</option>
+                                <?php foreach ($vehicles as $vehicle): ?>
+                                <option value="<?php echo $vehicle['id']; ?>" <?php if ($filter_vehicle_id == $vehicle['id']) echo 'selected'; ?>><?php echo htmlspecialchars($vehicle['vehicle_number']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label for="consignor_id" class="block text-sm font-medium text-gray-700">Consignor</label>
+                            <select name="consignor_id" id="consignor_id" class="searchable-select mt-1 block w-full">
+                                <option value="">All Consignors</option>
+                                <?php foreach ($parties as $party): ?>
+                                <option value="<?php echo $party['id']; ?>" <?php if ($filter_consignor_id == $party['id']) echo 'selected'; ?>><?php echo htmlspecialchars($party['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label for="consignee_id" class="block text-sm font-medium text-gray-700">Consignee</label>
+                            <select name="consignee_id" id="consignee_id" class="searchable-select mt-1 block w-full">
+                                <option value="">All Consignees</option>
+                                <?php foreach ($parties as $party): ?>
+                                <option value="<?php echo $party['id']; ?>" <?php if ($filter_consignee_id == $party['id']) echo 'selected'; ?>><?php echo htmlspecialchars($party['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+
                         <div class="flex items-end space-x-2">
                             <button type="submit" class="w-full inline-flex justify-center py-2 px-4 border shadow-sm text-sm font-medium rounded-lg text-white bg-indigo-600 hover:bg-indigo-700">Filter</button>
                             <a href="reports.php" class="w-full inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50">Reset</a>
@@ -179,12 +247,12 @@ if ($is_admin) {
                     </form>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-6">
-                    <div class="bg-green-500 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Total Revenue</h4><p class="text-3xl font-bold">₹<?php echo number_format($total_revenue, 2); ?></p></div>
-                    <div class="bg-red-500 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Shipment Expenses</h4><p class="text-3xl font-bold">₹<?php echo number_format($total_shipment_expenses, 2); ?></p></div>
-                    <div class="bg-red-600 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Salary Expenses</h4><p class="text-3xl font-bold">₹<?php echo number_format($total_salary_expenses, 2); ?></p></div>
-                    <div class="bg-red-700 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Other Op. Expenses</h4><p class="text-3xl font-bold">₹<?php echo number_format($total_op_expenses, 2); ?></p></div>
-                    <div class="<?php echo $net_profit >= 0 ? 'bg-blue-600' : 'bg-gray-700'; ?> text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Net Profit / Loss</h4><p class="text-3xl font-bold">₹<?php echo number_format($net_profit, 2); ?></p></div>
+                <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-3 gap-6 mb-6">
+                    <div class="bg-green-500 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Total Revenue</h4><p class="text-3xl font-bold">â‚¹<?php echo number_format($total_revenue, 2); ?></p></div>
+                    <div class="bg-red-500 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Shipment Expenses</h4><p class="text-3xl font-bold">â‚¹<?php echo number_format($total_shipment_expenses, 2); ?></p></div>
+                    <div class="bg-red-600 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Salary Expenses</h4><p class="text-3xl font-bold">â‚¹<?php echo number_format($total_salary_expenses, 2); ?></p></div>
+                    <div class="bg-red-700 text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Other Op. Expenses</h4><p class="text-3xl font-bold">â‚¹<?php echo number_format($total_op_expenses, 2); ?></p></div>
+                    <div class="<?php echo $net_profit >= 0 ? 'bg-blue-600' : 'bg-gray-700'; ?> text-white p-6 rounded-xl shadow-lg"><h4 class="text-lg opacity-80">Net Profit / Loss</h4><p class="text-3xl font-bold">â‚¹<?php echo number_format($net_profit, 2); ?></p></div>
                 </div>
 
                 <div class="bg-white p-6 rounded-xl shadow-md print-area">
@@ -237,6 +305,7 @@ if ($is_admin) {
         if (sidebarClose) { sidebarClose.addEventListener('click', toggleSidebar); }
         if (sidebarOverlay) { sidebarOverlay.addEventListener('click', toggleSidebar); }
         
+        // Init Select2 on all searchable-select classes
         $('.searchable-select').select2({ width: '100%' });
 
         $('#download-btn').on('click', function(e) {
