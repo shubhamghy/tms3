@@ -30,22 +30,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_payment'])) {
     $payment_date = $_POST['payment_date'];
     $payment_mode = $_POST['payment_mode'];
     $reference_no = $_POST['reference_no'];
-    $remarks = $_POST['remarks'] ?? null; // Get the new remarks
+    $remarks = $_POST['remarks'] ?? null;
     $received_by = $_SESSION['id'];
 
-    if (!empty($amount_received) && !empty($payment_date) && !empty($payment_mode)) {
+    if (!empty($amount_received) || !empty($tds_amount)) { // Allow 0 payment if TDS is present
         $mysqli->begin_transaction();
         try {
-            // 1. Insert into invoice_payments (with tds_amount and remarks)
+            // 1. Insert into invoice_payments
             $sql_pay = "INSERT INTO invoice_payments (invoice_id, payment_date, amount_received, tds_amount, payment_mode, reference_no, remarks, received_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
             $stmt_pay = $mysqli->prepare($sql_pay);
-            // Bind the new remarks (isddsssi -> isddsssi)
             $stmt_pay->bind_param("isddsssi", $invoice_id, $payment_date, $amount_received, $tds_amount, $payment_mode, $reference_no, $remarks, $received_by);
             $stmt_pay->execute();
             $stmt_pay->close();
 
             // 2. Update the invoice status (check against sum of amount_received AND tds_amount)
-            $sql_total = "SELECT total_amount, (SELECT SUM(amount_received) + SUM(tds_amount) FROM invoice_payments WHERE invoice_id = ?) as total_paid FROM invoices WHERE id = ?";
+            $sql_total = "SELECT total_amount, (SELECT SUM(COALESCE(amount_received, 0)) + SUM(COALESCE(tds_amount, 0)) FROM invoice_payments WHERE invoice_id = ?) as total_paid FROM invoices WHERE id = ?";
             $stmt_total = $mysqli->prepare($sql_total);
             $stmt_total->bind_param("ii", $invoice_id, $invoice_id);
             $stmt_total->execute();
@@ -76,6 +75,52 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_payment'])) {
     }
 }
 
+// --- NEW: Handle Delete Payment Action ---
+if (isset($_GET['action']) && $_GET['action'] === 'delete_payment' && isset($_GET['payment_id']) && $is_admin) {
+    $payment_id_to_delete = intval($_GET['payment_id']);
+
+    $mysqli->begin_transaction();
+    try {
+        // 1. Delete the payment
+        $stmt_del_pay = $mysqli->prepare("DELETE FROM invoice_payments WHERE id = ? AND invoice_id = ?");
+        $stmt_del_pay->bind_param("ii", $payment_id_to_delete, $invoice_id);
+        $stmt_del_pay->execute();
+        $stmt_del_pay->close();
+
+        // 2. Recalculate and update the invoice status
+        $sql_total = "SELECT total_amount, (SELECT SUM(COALESCE(amount_received, 0)) + SUM(COALESCE(tds_amount, 0)) FROM invoice_payments WHERE invoice_id = ?) as total_paid FROM invoices WHERE id = ?";
+        $stmt_total = $mysqli->prepare($sql_total);
+        $stmt_total->bind_param("ii", $invoice_id, $invoice_id);
+        $stmt_total->execute();
+        $totals = $stmt_total->get_result()->fetch_assoc();
+        $stmt_total->close();
+
+        $total_amount = $totals['total_amount'];
+        $total_paid = $totals['total_paid'] ?? 0;
+
+        // Determine new status (more robustly)
+        $new_status = 'Unpaid'; // Default
+        if (round($total_paid, 2) >= round($total_amount, 2)) {
+            $new_status = 'Paid';
+        } elseif ($total_paid > 0) {
+            $new_status = 'Partially Paid';
+        }
+        
+        $sql_update = "UPDATE invoices SET status = ? WHERE id = ?";
+        $stmt_update = $mysqli->prepare($sql_update);
+        $stmt_update->bind_param("si", $new_status, $invoice_id);
+        $stmt_update->execute();
+        $stmt_update->close();
+
+        $mysqli->commit();
+        $message = "<div class='p-4 mb-4 text-sm text-green-800 rounded-lg bg-green-50'>Payment deleted successfully.</div>";
+
+    } catch (Exception $e) {
+        $mysqli->rollback();
+        $message = "<div class='p-4 mb-4 text-sm text-red-800 rounded-lg bg-red-50'>Error deleting payment: " . $e->getMessage() . "</div>";
+    }
+}
+
 
 // Handle Remove Item Action
 if (isset($_GET['action']) && $_GET['action'] === 'remove_item' && isset($_GET['item_id']) && $is_admin) {
@@ -83,6 +128,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'remove_item' && isset($_GET['
     
     $mysqli->begin_transaction();
     try {
+        // Get amount to deduct
         $amount_sql = "SELECT amount FROM shipment_payments WHERE shipment_id = ? AND payment_type = 'Billing Rate'";
         $stmt_amount = $mysqli->prepare($amount_sql);
         $stmt_amount->bind_param("i", $item_to_remove_id);
@@ -90,17 +136,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'remove_item' && isset($_GET['
         $item_amount = $stmt_amount->get_result()->fetch_assoc()['amount'] ?? 0;
         $stmt_amount->close();
 
+        // Delete from invoice_items
         $delete_sql = "DELETE FROM invoice_items WHERE invoice_id = ? AND shipment_id = ?";
         $stmt_delete = $mysqli->prepare($delete_sql);
         $stmt_delete->bind_param("ii", $invoice_id, $item_to_remove_id);
         $stmt_delete->execute();
         $stmt_delete->close();
 
+        // Update invoice total
         $update_sql = "UPDATE invoices SET total_amount = total_amount - ? WHERE id = ?";
         $stmt_update = $mysqli->prepare($update_sql);
         $stmt_update->bind_param("di", $item_amount, $invoice_id);
         $stmt_update->execute();
         $stmt_update->close();
+
+        // TODO: Need to re-evaluate invoice status here as well
 
         $mysqli->commit();
         $message = "<div class='p-4 mb-4 text-sm text-green-800 rounded-lg bg-green-50'>Shipment removed successfully.</div>";
@@ -245,11 +295,11 @@ $balance_due = $invoice['total_amount'] - ($total_paid + $total_tds);
                             <div class="space-y-4">
                                 <div>
                                     <label for="amount_received" class="block text-sm font-medium text-gray-700">Amount Received</label>
-                                    <input type="number" step="0.01" name="amount_received" id="amount_received" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm" required>
+                                    <input type="number" step="0.01" name="amount_received" id="amount_received" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
                                 </div>
                                 
                                 <div>
-                                    <label for="tds_percent" class="block text-sm font-medium text-gray-700">TDS %</label>
+                                    <label for="tds_percent" class="block text-sm font-medium text-gray-700">TDS % (on Total Invoice)</label>
                                     <select id="tds_percent" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
                                         <option value="0">None (0%)</option>
                                         <option value="1">1%</option>
@@ -259,7 +309,7 @@ $balance_due = $invoice['total_amount'] - ($total_paid + $total_tds);
                                 
                                 <div>
                                     <label for="tds_amount" class="block text-sm font-medium text-gray-700">TDS Deducted Amount</label>
-                                    <input type="number" step="0.01" name="tds_amount" id="tds_amount" value="0.00" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-100" readonly>
+                                    <input type="number" step="0.01" name="tds_amount" id="tds_amount" value="0.00" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm">
                                 </div>
                                 
                                 <div>
@@ -301,11 +351,12 @@ $balance_due = $invoice['total_amount'] - ($total_paid + $total_tds);
                                         <th class="px-6 py-3 text-left text-xs font-medium uppercase">Remarks</th>
                                         <th class="px-6 py-3 text-right text-xs font-medium uppercase">Amount</th>
                                         <th class="px-6 py-3 text-right text-xs font-medium uppercase">TDS</th>
+                                        <th class="px-6 py-3 text-right text-xs font-medium uppercase">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody class="bg-white divide-y divide-gray-200">
                                     <?php if (empty($payment_history)): ?>
-                                        <tr><td colspan="6" class="text-center py-4 text-gray-500">No payments recorded yet.</td></tr>
+                                        <tr><td colspan="7" class="text-center py-4 text-gray-500">No payments recorded yet.</td></tr>
                                     <?php else: ?>
                                         <?php foreach ($payment_history as $payment): ?>
                                         <tr>
@@ -315,6 +366,18 @@ $balance_due = $invoice['total_amount'] - ($total_paid + $total_tds);
                                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($payment['remarks']); ?></td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm text-right">₹<?php echo htmlspecialchars(number_format($payment['amount_received'], 2)); ?></td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm text-right">₹<?php echo htmlspecialchars(number_format($payment['tds_amount'], 2)); ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                                <?php if ($is_admin): ?>
+                                                    <a href="manage_payments.php?action=edit&id=<?php echo $payment['id']; ?>&invoice_id=<?php echo $invoice_id; ?>" class="text-indigo-600 hover:text-indigo-900 mr-3" title="Edit">
+                                                        <i class="fas fa-pencil-alt"></i>
+                                                    </a>
+                                                    <a href="view_invoice_details.php?action=delete_payment&id=<?php echo $invoice_id; ?>&payment_id=<?php echo $payment['id']; ?>" class="text-red-600 hover:text-red-900" onclick="return confirm('Are you sure you want to delete this payment?');" title="Delete">
+                                                        <i class="fas fa-trash"></i>
+                                                    </a>
+                                                <?php else: ?>
+                                                    N/A
+                                                <?php endif; ?>
+                                            </td>
                                         </tr>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
