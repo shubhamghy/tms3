@@ -15,9 +15,9 @@ if (!$can_manage) {
     exit;
 }
 
-
 // --- Validation Checks ---
 if ($_SERVER["REQUEST_METHOD"] !== "POST") {
+    // Prevent direct access to this page
     header("location: manage_invoices.php");
     exit;
 }
@@ -32,34 +32,16 @@ if (!isset($_POST['consignor_id']) || intval($_POST['consignor_id']) === 0) {
     exit;
 }
 
-if (!isset($_POST['invoice_no']) || empty(trim($_POST['invoice_no']))) {
-    header("location: manage_invoices.php?error=" . urlencode("Invoice number cannot be empty."));
-    exit;
-}
-
 // --- All checks passed, proceed with invoice generation ---
 
 $shipment_ids = $_POST['shipment_ids'];
 $consignor_id = intval($_POST['consignor_id']);
-$invoice_no = trim($_POST['invoice_no']);
-$from_date = $_POST['date_from'] ?? null;
-$to_date = $_POST['date_to'] ?? null;
 $created_by_id = $_SESSION['id'];
 $invoice_date = date('Y-m-d');
-$total_amount = 0;
 
-// Check for duplicate invoice number
-$check_sql = "SELECT id FROM invoices WHERE invoice_no = ?";
-if ($check_stmt = $mysqli->prepare($check_sql)) {
-    $check_stmt->bind_param("s", $invoice_no);
-    $check_stmt->execute();
-    $check_stmt->store_result();
-    if ($check_stmt->num_rows > 0) {
-        header("location: manage_invoices.php?error=" . urlencode("This Invoice Number is already in use."));
-        exit;
-    }
-    $check_stmt->close();
-}
+// Generate a unique invoice number (e.g., INV-TIMESTAMP)
+$invoice_no = "INV-" . time();
+$total_amount = 0;
 
 $mysqli->begin_transaction();
 
@@ -76,9 +58,9 @@ try {
 
     if ($total_amount > 0) {
         // Insert into invoices table
-        $sql_invoice = "INSERT INTO invoices (invoice_no, invoice_date, from_date, to_date, consignor_id, total_amount, created_by_id) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        $sql_invoice = "INSERT INTO invoices (invoice_no, invoice_date, consignor_id, total_amount, created_by_id) VALUES (?, ?, ?, ?, ?)";
         $stmt_invoice = $mysqli->prepare($sql_invoice);
-        $stmt_invoice->bind_param("ssssidi", $invoice_no, $invoice_date, $from_date, $to_date, $consignor_id, $total_amount, $created_by_id);
+        $stmt_invoice->bind_param("ssidi", $invoice_no, $invoice_date, $consignor_id, $total_amount, $created_by_id);
         if (!$stmt_invoice->execute()) { throw new Exception("Error creating invoice record."); }
         $invoice_id = $stmt_invoice->insert_id;
         $stmt_invoice->close();
@@ -104,5 +86,5 @@ try {
     // Redirect back with an error message
     header("location: manage_invoices.php?error=" . urlencode($e->getMessage()));
     exit;
-} 
+}
 ?>
