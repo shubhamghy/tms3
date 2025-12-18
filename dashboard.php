@@ -71,7 +71,7 @@ if (in_array($_SESSION['role'], ['admin', 'manager'])) {
     $invoiced_count = $mysqli->query("SELECT COUNT(DISTINCT s.id) as count FROM shipments s JOIN invoice_items ii ON s.id = ii.shipment_id" . get_where_clause())->fetch_assoc()['count'];
     $pending_invoice_count = $mysqli->query("SELECT COUNT(id) as count FROM shipments s " . get_where_clause(["payment_entry_status = 'Done'", "NOT EXISTS (SELECT 1 FROM invoice_items ii WHERE ii.shipment_id = s.id)"]))->fetch_assoc()['count'];
     $awaiting_payment_count = $mysqli->query("SELECT COUNT(id) as count FROM shipments s" . get_where_clause(["payment_entry_status = 'Pending'"]))->fetch_assoc()['count'];
-    $payment_received_query = "SELECT SUM(ip.amount_received) as total FROM invoice_payments ip JOIN invoice_items ii ON ip.invoice_id = ii.invoice_id JOIN shipments s ON ii.shipment_id = s.id" . get_where_clause();
+    $payment_received_query = "SELECT SUM(COALESCE(ip.amount_received, 0) + COALESCE(ip.tds_amount, 0)) as total FROM invoice_payments ip JOIN invoice_items ii ON ip.invoice_id = ii.invoice_id JOIN shipments s ON ii.shipment_id = s.id" . get_where_clause();
     $payment_received_total = $mysqli->query($payment_received_query)->fetch_assoc()['total'] ?? 0;
 }
 
@@ -530,6 +530,7 @@ if ($in_transit_result) {
                     'Digarkhal': [24.81, 92.62],
                     'Churaibari': [24.33, 92.31],
                     'Mankachar': [25.53, 89.86],
+
                     'Hatsingimari': [25.86, 89.98],
                     'Phuentsholing': [26.85, 89.38],
                     'Thimphu town': [27.47, 89.63],
